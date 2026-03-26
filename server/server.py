@@ -5,22 +5,19 @@
 import socket
 import threading
 import time
-import sys+
+import sys
 import os
 
-# Permettre l'import de projet.py depuis le dossier parent
+# Import config projet
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import projet
 
-# ============================================================
-#  Stockage partagé des agents (accès depuis plusieurs threads)
-# ============================================================
-agents = {}          # { agent_id: { hostname, cpu, ram, last_seen } }
-agents_lock = threading.Lock()  # Verrou pour éviter les conflits entre threads
+# Import état partagé
+from shared_state import agents, agents_lock
 
 
 # ============================================================
-#  Gestion d'un client (tourne dans son propre thread)
+#  Gestion d'un client
 # ============================================================
 def handle_client(conn, addr):
     agent_id = None
@@ -30,7 +27,7 @@ def handle_client(conn, addr):
         while True:
             data = conn.recv(projet.BUFFER_SIZE)
             if not data:
-                break  # Le client s'est déconnecté
+                break
 
             message = data.decode(projet.ENCODING).strip()
             print(f"[←] {addr} : {message}")
@@ -42,169 +39,114 @@ def handle_client(conn, addr):
 
             commande = parts[0].upper()
 
-            # --- HELLO <agent_id> <hostname> ---
+            # HELLO
             if commande == "HELLO":
                 if len(parts) != 3:
                     conn.sendall(b"ERROR format: HELLO <agent_id> <hostname>\n")
                     continue
+
                 agent_id = parts[1]
                 hostname = parts[2]
 
-                # Vérification : pas d'espaces dans agent_id (déjà garanti par split)
                 with agents_lock:
                     agents[agent_id] = {
-                        "hostname":  hostname,
-                        "cpu":       0.0,
-                        "ram":       0.0,
+                        "hostname": hostname,
+                        "cpu": 0.0,
+                        "ram": 0.0,
                         "last_seen": time.time(),
-                        "addr":      str(addr)
+                        "addr": str(addr[0]),
+                        "status": "actif"
                     }
 
                 conn.sendall(b"OK\n")
-                print(f"[✓] Agent enregistré : {agent_id} ({hostname})")
+                print(f"[✓] Agent enregistré : {agent_id}")
 
-            # --- REPORT <agent_id> <timestamp> <cpu_pct> <ram_mb> ---
+            # REPORT
             elif commande == "REPORT":
                 if len(parts) != 5:
-                    conn.sendall(b"ERROR format: REPORT <agent_id> <timestamp> <cpu_pct> <ram_mb>\n")
+                    conn.sendall(b"ERROR format REPORT\n")
                     continue
-
-                rep_agent_id = parts[1]
 
                 try:
-                    timestamp = float(parts[2])
-                    cpu_pct   = float(parts[3])
-                    ram_mb    = float(parts[4])
-                except ValueError:
-                    conn.sendall(b"ERROR valeurs numeriques invalides\n")
-                    continue
-
-                # Validation des valeurs
-                if not (0 <= cpu_pct <= 100):
-                    conn.sendall(b"ERROR cpu_pct doit etre entre 0 et 100\n")
-                    continue
-                if ram_mb < 0:
-                    conn.sendall(b"ERROR ram_mb doit etre >= 0\n")
+                    aid = parts[1]
+                    cpu = float(parts[3])
+                    ram = float(parts[4])
+                except:
+                    conn.sendall(b"ERROR valeurs invalides\n")
                     continue
 
                 with agents_lock:
-                    if rep_agent_id in agents:
-                        agents[rep_agent_id]["cpu"]       = cpu_pct
-                        agents[rep_agent_id]["ram"]       = ram_mb
-                        agents[rep_agent_id]["last_seen"] = time.time()
+                    if aid in agents:
+                        agents[aid]["cpu"] = cpu
+                        agents[aid]["ram"] = ram
+                        agents[aid]["last_seen"] = time.time()
+                        agents[aid]["status"] = "actif"
                     else:
-                        conn.sendall(b"ERROR agent non enregistre, envoie HELLO d'abord\n")
+                        conn.sendall(b"ERROR agent inconnu\n")
                         continue
 
                 conn.sendall(b"OK\n")
 
-                # Alerte CPU
-                if cpu_pct > projet.CPU_ALERT_THRESHOLD:
-                    print(f"[⚠️  ALERTE] {rep_agent_id} : CPU élevé → {cpu_pct}%")
-
-            # --- BYE <agent_id> ---
+            # BYE
             elif commande == "BYE":
-                if len(parts) != 2:
-                    conn.sendall(b"ERROR format: BYE <agent_id>\n")
-                    continue
-
-                bye_agent_id = parts[1]
+                aid = parts[1]
                 with agents_lock:
-                    if bye_agent_id in agents:
-                        del agents[bye_agent_id]
-                        print(f"[-] Agent déconnecté proprement : {bye_agent_id}")
+                    if aid in agents:
+                        agents[aid]["status"] = "déconnecté"
 
                 conn.sendall(b"OK\n")
-                break  # Fermer la connexion
+                break
 
             else:
-                conn.sendall(f"ERROR commande inconnue: {commande}\n".encode(projet.ENCODING))
+                conn.sendall(b"ERROR commande inconnue\n")
 
-    except ConnectionResetError:
-        print(f"[!] Connexion perdue brutalement : {addr}")
     except Exception as e:
-        print(f"[!] Erreur inattendue avec {addr} : {e}")
+        print(f"[!] Erreur {addr}: {e}")
+
     finally:
-        # Nettoyage : retirer l'agent si pas déjà fait (déconnexion brutale)
         if agent_id:
             with agents_lock:
                 if agent_id in agents:
-                    del agents[agent_id]
-                    print(f"[-] Agent retiré (déconnexion) : {agent_id}")
+                    agents[agent_id]["status"] = "déconnecté"
         conn.close()
 
 
 # ============================================================
-#  Thread qui affiche les stats globales toutes les T secondes
+#  Vérification des agents inactifs
 # ============================================================
-def afficher_stats():
+def check_inactivity():
     while True:
         time.sleep(projet.STATS_INTERVAL)
         now = time.time()
 
-       ''' with agents_lock:
-            # Retirer les agents inactifs (aucun REPORT depuis 3×T secondes)
-            inactifs = [
-                aid for aid, info in agents.items()
-                if now - info["last_seen"] > projet.TIMEOUT_AGENT
-            ]
-            for aid in inactifs:
-                print(f"[⏱️] Agent timeout (inactif) : {aid}")
-                del agents[aid]
-'''
-            actifs = list(agents.values())
-        #faire tableau de stats globales
-        nb = len(actifs)
-        if nb == 0:
-            print(f"\n{'='*45}")
-            print(f"  📊 Stats — Aucun agent connecté")
-            print(f"{'='*45}\n")
-        else:
-            moy_cpu = sum(a["cpu"] for a in actifs) / nb
-            moy_ram = sum(a["ram"] for a in actifs) / nb
-            print(f"\n{'='*45}")
-            print(f"  📊 Stats globales ({nb} agent(s) actif(s))")
-            print(f"  CPU moyen  : {moy_cpu:.1f}%")
-            print(f"  RAM moyenne: {moy_ram:.1f} MB")
-            print(f"{'='*45}")
+        with agents_lock:
             for aid, info in agents.items():
-                print(f"  • {aid} ({info['hostname']}) — CPU: {info['cpu']}% | RAM: {info['ram']} MB")
-            print()
+                if now - info["last_seen"] > projet.TIMEOUT_AGENT:
+                    info["status"] = "inactif"
 
 
 # ============================================================
-#  Point d'entrée principal
+#  Serveur principal
 # ============================================================
 def main():
-    print(f"🖥️  Serveur de monitoring démarré sur {projet.HOST}:{projet.PORT}")
-    print(f"   Intervalle stats : {projet.STATS_INTERVAL}s | Timeout agent : {projet.TIMEOUT_AGENT}s")
-    print(f"   En attente de connexions...\n")
+    print(f"🖥️ Serveur démarré sur {projet.HOST}:{projet.PORT}")
 
-    # Lancer le thread d'affichage des stats
-    stats_thread = threading.Thread(target=afficher_stats, daemon=True)
-    stats_thread.start()
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.bind((projet.HOST, projet.PORT))
+    sock.listen(10)
 
-    # Créer le socket serveur
-    server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)  # Réutiliser le port
-    server_sock.bind((projet.HOST, projet.PORT))
-    server_sock.listen(10)  # Jusqu'à 10 connexions en attente
+    threading.Thread(target=check_inactivity, daemon=True).start()
 
     try:
         while True:
-            conn, addr = server_sock.accept()
-            # Chaque client dans son propre thread
-            client_thread = threading.Thread(
-                target=handle_client,
-                args=(conn, addr),
-                daemon=True
-            )
-            client_thread.start()
+            conn, addr = sock.accept()
+            threading.Thread(target=handle_client, args=(conn, addr), daemon=True).start()
 
     except KeyboardInterrupt:
-        print("\n[!] Arrêt du serveur (Ctrl+C)")
+        print("Arrêt serveur")
+
     finally:
-        server_sock.close()
+        sock.close()
 
 
 if __name__ == "__main__":
