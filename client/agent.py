@@ -6,17 +6,16 @@ import socket
 import threading
 import time
 import sys
-import os
-import argparse
+import os #pour construire les chemins de fichiers
+import argparse #pour lire les arguments de la ligne de commande 
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..")) #?
 import config
 
 try:
-    import psutil
-    PSUTIL_AVAILABLE = True
+    import psutil #bibliotheque qui extrait des info relatives au systeme tels que (CPU, RAM,...)  PSUTIL_AVAILABLE = True
 except ImportError:
-    PSUTIL_AVAILABLE = False
+    PSUTIL_AVAILABLE = False #on utilisera une méthode alternative pour lire le CPU/RAM
 
 
 # ============================================================
