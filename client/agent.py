@@ -1,7 +1,6 @@
 # ============================================================
 #  agent.py — Client TCP de monitoring
 # ============================================================
-
 import socket
 import threading
 import time
@@ -16,7 +15,6 @@ try:
     import psutil #bibliotheque qui extrait des info relatives au systeme tels que (CPU, RAM,...)  PSUTIL_AVAILABLE = True
 except ImportError:
     PSUTIL_AVAILABLE = False #on utilisera une méthode alternative pour lire le CPU/RAM
-
 
 # ============================================================
 #  Lecture CPU et RAM
@@ -37,7 +35,6 @@ def lire_cpu():
     total2 = sum(vals2)
     return round(100.0 * (1 - (idle2 - idle) / (total2 - total)), 1)
 
-
 def lire_ram():
     if PSUTIL_AVAILABLE:
         return round(psutil.virtual_memory().used / 1024 / 1024, 1)
@@ -49,7 +46,6 @@ def lire_ram():
         mem[parts[0].rstrip(":")] = int(parts[1])
     used_kb = mem["MemTotal"] - mem["MemAvailable"]
     return round(used_kb / 1024, 1)
-
 
 # ============================================================
 #  Fonction principale de l'agent
